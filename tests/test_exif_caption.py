@@ -59,6 +59,13 @@ def _save_png_with_caption_metadata(path: Path, caption: dict) -> None:
     image.save(path, pnginfo=metadata)
 
 
+def _save_png_with_parameters_metadata(path: Path, parameters: str) -> None:
+    image = Image.new("RGB", (8, 8), color="white")
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("parameters", parameters)
+    image.save(path, pnginfo=metadata)
+
+
 def _save_png_with_comfy_workflow(path: Path, node_texts: list[str]) -> None:
     workflow = {
         "nodes": [
@@ -231,6 +238,74 @@ class ExifCaptionTests(unittest.TestCase):
 
             self.assertIsNone(caption)
             self.assertIsNone(caption_message)
+            self.assertIn("Imported prompt text", text_message or "")
+            self.assertEqual(text, prompt)
+
+    def test_imports_automatic1111_parameters_as_plain_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image_path = Path(temp) / "sample.png"
+            prompt = "masterpiece, best quality, a woman standing in a neon city"
+            parameters = (
+                f"{prompt}\n"
+                "Negative prompt: blurry, low quality\n"
+                "Steps: 28, Sampler: DPM++ 2M Karras, CFG scale: 7, Seed: 1234, Size: 768x1024, "
+                "Model hash: abcdef12, Model: realisticVision, Version: v1.10.1"
+            )
+            _save_png_with_parameters_metadata(image_path, parameters)
+
+            caption, caption_message = try_import_caption_from_exif(image_path)
+            text, text_message = try_import_prompt_text_from_exif(image_path)
+
+            self.assertIsNone(caption)
+            self.assertIsNone(caption_message)
+            self.assertIn("Imported prompt text", text_message or "")
+            self.assertEqual(text, prompt)
+
+    def test_imports_automatic1111_multiline_prompt_without_negative_prompt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image_path = Path(temp) / "sample.png"
+            prompt = "cinematic portrait of a pilot\ninside a spacecraft cockpit"
+            parameters = (
+                f"{prompt}\n"
+                "Steps: 20, Sampler: Euler a, CFG scale: 6, Seed: 5678, Size: 512x768, Model: dreamshaper"
+            )
+            _save_png_with_parameters_metadata(image_path, parameters)
+
+            text, text_message = try_import_prompt_text_from_exif(image_path)
+
+            self.assertIn("Imported prompt text", text_message or "")
+            self.assertEqual(text, prompt)
+
+    def test_imports_jpeg_user_comment_parameters_as_plain_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image_path = Path(temp) / "sample.jpg"
+            prompt = "oil painting of a quiet library with warm lamps"
+            parameters = (
+                f"{prompt}\n"
+                "Negative prompt: noisy\n"
+                "Steps: 32, Sampler: UniPC, CFG scale: 5, Seed: 42, Size: 832x1216, Model: artModel"
+            )
+            image = Image.new("RGB", (8, 8), color="white")
+            exif = Image.Exif()
+            exif[37510] = b"ASCII\x00\x00\x00" + parameters.encode("ascii")
+            image.save(image_path, exif=exif)
+
+            text, text_message = try_import_prompt_text_from_exif(image_path)
+
+            self.assertIn("Imported prompt text", text_message or "")
+            self.assertEqual(text, prompt)
+
+    def test_imports_plain_prompt_metadata_field(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image_path = Path(temp) / "sample.png"
+            prompt = "a detailed macro photograph of rain on a red flower"
+            image = Image.new("RGB", (8, 8), color="white")
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("prompt", prompt)
+            image.save(image_path, pnginfo=metadata)
+
+            text, text_message = try_import_prompt_text_from_exif(image_path)
+
             self.assertIn("Imported prompt text", text_message or "")
             self.assertEqual(text, prompt)
 

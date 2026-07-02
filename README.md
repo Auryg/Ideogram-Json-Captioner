@@ -59,7 +59,10 @@ python run_captioner.py
 4. Select an image, edit the fields, then use `Save` or `Enter` to save and move
    to the next image.
 
-The app will also load metadata from ComfyUI files as either Ideogram JSON format or regular text captions.
+The app will also load image metadata as either Ideogram JSON or regular text
+captions. This supports ComfyUI metadata, ComfyUI Ideogram Prompt Builder
+nodes, direct Ideogram JSON in PNG/EXIF fields, and Automatic1111/Forge/Forge
+NEO `parameters` prompt metadata.
    
 ### Automatic Captioning: 
 If you don't already have an OpenAI-compatible server, the easiest way to get automatic captioning working is to grab llama.cpp from their releases section - https://github.com/ggml-org/llama.cpp/releases - and be sure to grab the CUDA .dlls and put them in the same folder as llama-server.exe if you're using an Nvidia card, otherwise it will probably be quite slow.

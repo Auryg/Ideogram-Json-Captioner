@@ -41,6 +41,17 @@ _UTILITY_CLASSES = {
 }
 _CAPTION_KEYS = {"high_level_description", "style_description", "compositional_deconstruction"}
 _PROMPT_BUILDER_CLASSES = {"ideogram4promptbuilderkj", "ideogram4promptbuilder"}
+_A1111_SETTING_KEYS = (
+    "Steps",
+    "Sampler",
+    "Schedule type",
+    "CFG scale",
+    "Seed",
+    "Size",
+    "Model hash",
+    "Model",
+    "Version",
+)
 
 
 def _decode_text(value: Any) -> str | None:
@@ -76,6 +87,8 @@ def _collect_raw_fields(path: str | Path) -> dict[str, str]:
     fields: dict[str, str] = {}
     with Image.open(path) as image:
         for key, value in image.info.items():
+            if key.lower() in {"exif", "icc_profile"}:
+                continue
             text = _decode_text(value)
             if text:
                 fields[f"info:{key}"] = text
@@ -380,9 +393,61 @@ def _looks_like_json_text(text: str) -> bool:
     return bool(text) and (text[0] in "[{" or text.startswith("```"))
 
 
+def _looks_like_a1111_parameters(text: str) -> bool:
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return False
+    settings_line = lines[-1]
+    return sum(1 for key in _A1111_SETTING_KEYS if f"{key}:" in settings_line) >= 2
+
+
+def _strip_a1111_generation_parameters(text: str) -> str | None:
+    text = text.strip()
+    if not text:
+        return None
+
+    lines = text.splitlines()
+    prompt_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("Negative prompt:"):
+            break
+        if prompt_lines and sum(1 for key in _A1111_SETTING_KEYS if f"{key}:" in stripped) >= 2:
+            break
+        prompt_lines.append(line)
+
+    prompt = "\n".join(prompt_lines).strip()
+    if prompt.startswith("Prompt:"):
+        prompt = prompt[len("Prompt:") :].strip()
+    return prompt or None
+
+
+def _stable_diffusion_prompt_candidates(path: str | Path) -> list[str]:
+    try:
+        fields = _collect_raw_fields(path)
+    except Exception:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for key, value in fields.items():
+        key_name = key.split(":", 1)[-1].lower()
+        text = value.strip()
+        prompt: str | None = None
+        if key_name in {"parameters", "usercomment", "imagedescription", "comment"} or _looks_like_a1111_parameters(text):
+            prompt = _strip_a1111_generation_parameters(text)
+        elif "prompt" in key_name and not _looks_like_json_text(text):
+            prompt = text
+
+        if prompt and len(prompt) >= _MIN_TEXT_LEN and prompt not in seen and not _looks_like_json_text(prompt):
+            seen.add(prompt)
+            candidates.append(prompt)
+    return candidates
+
+
 def try_import_prompt_text_from_exif(path: str | Path) -> tuple[str | None, str | None]:
-    """Try to import plain ComfyUI prompt text from image metadata."""
-    for text in workflow_text_candidates(path):
+    """Try to import plain generation prompt text from image metadata."""
+    for text in [*_stable_diffusion_prompt_candidates(path), *workflow_text_candidates(path)]:
         text = text.strip()
         if len(text) >= _MIN_TEXT_LEN and not _looks_like_json_text(text):
             return text, "Imported prompt text from image metadata; click Save to persist as text caption."
