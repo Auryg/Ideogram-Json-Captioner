@@ -13,7 +13,7 @@ import urllib.request
 from urllib.parse import urlparse
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from PIL import ExifTags, Image
 
@@ -25,6 +25,9 @@ ProgressCallback = Callable[[str], None]
 BBOX_BACKEND_VLM = "vlm"
 BBOX_BACKEND_YOLOE26 = "yoloe26"
 BBOX_BACKENDS = {BBOX_BACKEND_VLM, BBOX_BACKEND_YOLOE26}
+PLAIN_CAPTION_MODE_STANDARD = "standard"
+PLAIN_CAPTION_MODE_PERSON = "person"
+PLAIN_CAPTION_MODES = {PLAIN_CAPTION_MODE_STANDARD, PLAIN_CAPTION_MODE_PERSON}
 DEFAULT_YOLOE26_BBOX_MODEL = "yoloe-26l-seg.pt"
 DEFAULT_ULTRALYTICS_BBOX_CONFIDENCE = 0.25
 DEFAULT_YOLO_BBOX_IMGSZ = 1024
@@ -208,15 +211,22 @@ DEFAULT_PROFILE_DATA: dict[str, Any] = {
             "mmproj_filename": "mmproj-F16.gguf",
         },
         {
+            "id": "local-model",
+            "label": "Existing server: discover or enter model ID",
+            "tasks": ["caption", "bbox"],
+            "kind": "server",
+            "api_model": "",
+        },
+        {
             "id": "server-qwen3vl",
-            "label": "Existing server alias: qwen3vl",
+            "label": "Existing server model ID: qwen3vl",
             "tasks": ["caption", "bbox"],
             "kind": "server",
             "api_model": "qwen3vl",
         },
         {
             "id": "server-gemma-vl",
-            "label": "Existing server alias: gemma-vl",
+            "label": "Existing server model ID: gemma-vl",
             "tasks": ["caption"],
             "kind": "server",
             "api_model": "gemma-vl",
@@ -240,10 +250,20 @@ def _profile_from_dict(raw: dict[str, Any]) -> ModelProfile | None:
     if kind not in {"hf", "server", "local"}:
         return None
 
+    api_model = str(raw.get("api_model", "")).strip()
+    if kind == "server" and label.startswith("Existing server alias: "):
+        if profile_id == "local-model":
+            label = "Existing server: discover or enter model ID"
+        else:
+            label = label.replace("Existing server alias: ", "Existing server model ID: ", 1)
+    if profile_id == "local-model" and kind == "server":
+        if api_model == "local-model":
+            api_model = ""
+
     return ModelProfile(
         id=profile_id,
         label=label,
-        api_model=str(raw.get("api_model", "")).strip(),
+        api_model=api_model,
         kind=kind,
         hf_repo=str(raw.get("hf_repo", "")).strip(),
         mmproj_repo=str(raw.get("mmproj_repo", "")).strip(),
@@ -349,6 +369,8 @@ class CaptioningSettings:
     disable_thinking: bool = True
     debug_llm_output: bool = False
     vision_image_format: str = "auto"
+    plain_caption_mode: str = PLAIN_CAPTION_MODE_STANDARD
+    person_caption_name: str = ""
     json_refine_instructions: str = DEFAULT_JSON_REFINE_INSTRUCTIONS
 
     max_tokens_caption: int = 2000
@@ -386,6 +408,10 @@ class CaptioningSettings:
             self.bbox_backend = BBOX_BACKEND_YOLOE26
         else:
             self.bbox_backend = BBOX_BACKEND_VLM
+        self.plain_caption_mode = str(self.plain_caption_mode or "").strip().lower()
+        if self.plain_caption_mode not in PLAIN_CAPTION_MODES:
+            self.plain_caption_mode = PLAIN_CAPTION_MODE_STANDARD
+        self.person_caption_name = str(self.person_caption_name or "").strip()
         yolo_bbox_model = str(self.yolo_bbox_model or "").strip()
         if self.bbox_backend == BBOX_BACKEND_YOLOE26 and (
             not yolo_bbox_model or re.fullmatch(r"yolo26[nsmlx]?\.pt", yolo_bbox_model)
@@ -719,6 +745,32 @@ def server_model_ids(base_url: str, api_key: str = "", timeout: float = 3.0) -> 
             if isinstance(model_id, str) and model_id.strip():
                 ids.add(model_id.strip())
     return ids
+
+
+def resolve_server_model_id(
+    configured_model: str,
+    model_ids: Iterable[str],
+    *,
+    auto_select_single: bool = False,
+) -> str:
+    configured = configured_model.strip()
+    available = sorted({model_id.strip() for model_id in model_ids if model_id.strip()})
+    if configured and (not available or configured in available):
+        return configured
+    if auto_select_single and len(available) == 1:
+        return available[0]
+
+    available_text = ", ".join(available) or "(none reported)"
+    if configured:
+        raise AutoCaptionError(
+            f"The server does not expose the configured API model ID '{configured}'. "
+            f"Available model IDs: {available_text}. In Preferences, use Test / Discover Models "
+            "and select the exact ID reported by the server."
+        )
+    raise AutoCaptionError(
+        f"No API model ID is selected. Available model IDs: {available_text}. "
+        "In Preferences, use Test / Discover Models and select a model."
+    )
 
 
 def is_server_ready(base_url: str, api_key: str = "", timeout: float = 3.0) -> bool:
@@ -1355,6 +1407,25 @@ Write a detailed but clean text-to-image caption for this image. Keep it useful
 for recreating the image, but avoid unsupported proper names or speculation.
 """.strip()
 
+PERSON_CAPTION_SYSTEM = """
+You write factual plain-text captions for image-generation training datasets of known people.
+Return one polished single-line caption only. No markdown, no JSON, no bullet points, and no newlines.
+Use the provided person's name at least once.
+Do not describe the named person's physical features, face, body, age, ethnicity, skin, hair, or other biometric traits.
+You may describe clothing, pose, action, objects, setting, lighting, viewpoint, composition, mood, and photo quality.
+If there are multiple people, identify them by position such as left, right, center, foreground, or background.
+Use bracketed generic labels like [MAN], [WOMAN], [BOY], or [GIRL] for people whose names are not provided.
+If more than two people are visible, assume the provided name belongs to the most prominent or in-focus person; if equal, assume it belongs to the leftmost person.
+""".strip()
+
+PERSON_CAPTION_USER = """
+Caption this image for a text-to-image LoRA dataset.
+Provided person name: {person_name}
+
+Describe the image naturally and descriptively while following the system rules.
+For images with two or more featured people, explicitly describe each featured person by position and use the provided name for the named person.
+""".strip()
+
 CREATIVE_DIRECTIVE = """
 Expansion policy:
 - Preserve the source caption's idea.
@@ -1532,6 +1603,8 @@ Return only:
 DEFAULT_PROMPT_TEXTS: dict[str, str] = {
     "plain_caption_system": PLAIN_CAPTION_SYSTEM,
     "plain_caption_user": PLAIN_CAPTION_USER,
+    "person_caption_system": PERSON_CAPTION_SYSTEM,
+    "person_caption_user": PERSON_CAPTION_USER,
     "creative_directive": CREATIVE_DIRECTIVE,
     "faithful_directive": FAITHFUL_DIRECTIVE,
     "json_schema_instructions": JSON_SCHEMA_INSTRUCTIONS,
@@ -1579,19 +1652,32 @@ def format_prompt(template: str, **values: Any) -> str:
         raise AutoCaptionError(f"Prompt is missing required placeholder {{{exc.args[0]}}}.") from exc
 
 
-def generate_plain_caption(settings: CaptioningSettings, image_path: Path) -> str:
+def single_line_caption(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().strip('"').strip())
+
+
+def generate_plain_caption(settings: CaptioningSettings, image_path: Path, person_name: str | None = None) -> str:
     config = runtime_config_for_task(settings, "caption")
     prompts = load_prompts()
+    if settings.plain_caption_mode == PLAIN_CAPTION_MODE_PERSON:
+        resolved_name = (person_name if person_name is not None else settings.person_caption_name).strip()
+        if not resolved_name:
+            raise AutoCaptionError("Enter a person name before using person text caption mode.")
+        system = prompts["person_caption_system"]
+        user = format_prompt(prompts["person_caption_user"], person_name=resolved_name)
+    else:
+        system = prompts["plain_caption_system"]
+        user = prompts["plain_caption_user"]
     raw = chat_vision(
         settings=settings,
         model=config.api_model,
         image_path=image_path,
-        system=prompts["plain_caption_system"],
-        user=prompts["plain_caption_user"],
+        system=system,
+        user=user,
         max_tokens=settings.max_tokens_caption,
         temperature=0.2,
     )
-    return raw.strip().strip('"').strip()
+    return single_line_caption(raw)
 
 
 def _directive(settings: CaptioningSettings) -> str:

@@ -10,6 +10,7 @@ from ideogram_captioner.llm_captioning import (
     DEFAULT_YOLOE26_BBOX_MODEL,
     ModelAssets,
     ModelJsonError,
+    PLAIN_CAPTION_MODE_PERSON,
     add_bboxes_to_caption,
     append_image_exif_context,
     build_llama_server_command,
@@ -24,6 +25,7 @@ from ideogram_captioner.llm_captioning import (
     format_prompt,
     generate_json_from_image,
     generate_json_refinement,
+    generate_plain_caption,
     image_exif_context,
     json_system_prompt,
     load_model_profiles,
@@ -32,6 +34,7 @@ from ideogram_captioner.llm_captioning import (
     parse_batch_bboxes_with_reasons,
     parse_json_with_repair,
     request_user_prompt,
+    resolve_server_model_id,
     runtime_config_for_task,
     safe_repo_dir,
     server_host_port,
@@ -320,6 +323,30 @@ class LlmCaptioningTests(unittest.TestCase):
         self.assertEqual(profiles["caption"][-2].id, "custom-hf")
         self.assertEqual(profiles["caption"][-1].id, "custom-local")
 
+    def test_migrates_legacy_local_model_server_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "profiles.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [
+                            {
+                                "id": "local-model",
+                                "label": "Existing server alias: local-model",
+                                "tasks": ["caption"],
+                                "kind": "server",
+                                "api_model": "local-model",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile = load_model_profiles(path)["caption"][0]
+
+        self.assertEqual(profile.label, "Existing server: discover or enter model ID")
+        self.assertEqual(profile.api_model, "")
+
     def test_loads_partial_prompt_overrides(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp) / "prompts"
@@ -331,6 +358,7 @@ class LlmCaptioningTests(unittest.TestCase):
         self.assertIn("{targets_json}", prompts["bbox_user"])
         self.assertIn("{instructions}", prompts["json_refine_user"])
         self.assertIn("plain_caption_system", prompts)
+        self.assertIn("{person_name}", prompts["person_caption_user"])
 
     def test_writes_default_prompt_folder(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -340,10 +368,31 @@ class LlmCaptioningTests(unittest.TestCase):
             self.assertTrue((written / "bbox_user.txt").exists())
             self.assertTrue((written / "text_to_json_user.txt").exists())
             self.assertTrue((written / "json_refine_user.txt").exists())
+            self.assertTrue((written / "person_caption_user.txt").exists())
 
     def test_prompt_placeholder_errors_are_actionable(self):
         with self.assertRaises(AutoCaptionError):
             format_prompt("{missing}", present="x")
+
+    def test_person_plain_caption_uses_name_prompt_and_single_line_output(self):
+        settings = CaptioningSettings(
+            caption_model="vision-model",
+            plain_caption_mode=PLAIN_CAPTION_MODE_PERSON,
+            person_caption_name="Alex",
+        )
+        with patch("ideogram_captioner.llm_captioning.chat_vision", return_value='"Alex is seated indoors.\nA lamp is nearby."') as chat:
+            caption = generate_plain_caption(settings, Path("sample.png"))
+
+        self.assertEqual(caption, "Alex is seated indoors. A lamp is nearby.")
+        request = chat.call_args.kwargs
+        self.assertIn("known people", request["system"])
+        self.assertIn("Provided person name: Alex", request["user"])
+
+    def test_person_plain_caption_requires_name(self):
+        settings = CaptioningSettings(caption_model="vision-model", plain_caption_mode=PLAIN_CAPTION_MODE_PERSON)
+
+        with self.assertRaises(AutoCaptionError):
+            generate_plain_caption(settings, Path("sample.png"))
 
     def test_json_directive_is_system_side(self):
         prompts = load_prompts(Path("__missing_prompts_folder__"))
@@ -514,6 +563,33 @@ class LlmCaptioningTests(unittest.TestCase):
 
         with patch("urllib.request.urlopen", return_value=Response()):
             self.assertEqual(server_model_ids("http://127.0.0.1:8000/v1"), {"qwen3vl", "local-model"})
+
+    def test_resolve_server_model_id_keeps_exact_match(self):
+        self.assertEqual(
+            resolve_server_model_id("model-b", {"model-a", "model-b"}, auto_select_single=True),
+            "model-b",
+        )
+
+    def test_resolve_server_model_id_auto_selects_only_model(self):
+        self.assertEqual(
+            resolve_server_model_id("local-model", {"lm-studio/qwen-vision"}, auto_select_single=True),
+            "lm-studio/qwen-vision",
+        )
+        self.assertEqual(
+            resolve_server_model_id("", {"lm-studio/qwen-vision"}, auto_select_single=True),
+            "lm-studio/qwen-vision",
+        )
+
+    def test_resolve_server_model_id_requires_choice_for_multiple_models(self):
+        with self.assertRaisesRegex(AutoCaptionError, "model-a, model-b"):
+            resolve_server_model_id("local-model", {"model-b", "model-a"}, auto_select_single=True)
+        with self.assertRaisesRegex(AutoCaptionError, "No API model ID is selected"):
+            resolve_server_model_id("", {"model-b", "model-a"}, auto_select_single=True)
+
+    def test_resolve_server_model_id_allows_manual_id_when_server_reports_none(self):
+        self.assertEqual(resolve_server_model_id("manual-model", set()), "manual-model")
+        with self.assertRaisesRegex(AutoCaptionError, "none reported"):
+            resolve_server_model_id("", set(), auto_select_single=True)
 
     def test_builds_llama_server_command(self):
         with tempfile.TemporaryDirectory() as temp:

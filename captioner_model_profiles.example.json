@@ -63,21 +63,21 @@
     },
     {
       "id": "local-model",
-      "label": "Existing server alias: local-model",
+      "label": "Existing server: discover or enter model ID",
       "tasks": ["caption", "bbox"],
       "kind": "server",
-      "api_model": "local-model"
+      "api_model": ""
     },
     {
       "id": "server-qwen3vl",
-      "label": "Existing server alias: qwen3vl",
+      "label": "Existing server model ID: qwen3vl",
       "tasks": ["caption", "bbox"],
       "kind": "server",
       "api_model": "qwen3vl"
     },
     {
       "id": "server-gemma-vl",
-      "label": "Existing server alias: gemma-vl",
+      "label": "Existing server model ID: gemma-vl",
       "tasks": ["caption"],
       "kind": "server",
       "api_model": "gemma-vl"

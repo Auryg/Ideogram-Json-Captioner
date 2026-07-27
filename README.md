@@ -21,6 +21,8 @@ Ollama-compatible server.
 - Generate text captions, JSON captions from text, JSON captions from images,
   JSON refinements, and bounding boxes with a local or existing
   vision-language model server or local Ultralytics detector.
+- Switch plain text captioning between general image captions and person dataset
+  captions with a reusable person name.
 - Batch auto-caption selected images, retry failed captions, and undo the last
   auto-captioning job.
 - Sort and filter the image list by name, modified date, missing/blank JSON/text captions, or
@@ -102,6 +104,15 @@ The app reuses an already-running endpoint when one is available. Use
 `Connect to existing server` for LM Studio, llama.cpp, vLLM, Ollama bridges, or
 another OpenAI-compatible server you started yourself.
 
+For an existing server, click `Test / Discover Models` on the Connection tab.
+The app reads the exact model IDs from the server's `/models` endpoint and adds
+them as choices for `API model ID` on the Models tab. If the server exposes
+exactly one model, it is selected automatically. If it exposes more than one,
+choose the intended model for captioning and, when using the VLM bbox backend,
+for bboxes. You can also type an ID manually for servers that do not report
+their models. Model IDs are server-defined: an LM Studio ID may differ from a
+downloaded model's filename or the alias used by local llama.cpp.
+
 The right-side `Auto Captioning` buttons do the following:
 
 - `Text Caption`: creates or replaces the plain text caption.
@@ -115,6 +126,14 @@ The right-side `Auto Captioning` buttons do the following:
 - `Retry Failed`: reruns images that have failed auto-captioning markers.
 - `Clear Failed`: removes failed markers without rerunning the model.
 - `Undo AI`: restores JSON/text captions from before the last auto-captioning job.
+
+Use the text caption mode selector above those buttons when captioning datasets
+of one person. `Person dataset captions` requires the `Person name` field, uses
+that name in generated `.txt` captions, and avoids physical-feature descriptions
+while still describing clothing, action, setting, lighting, composition, and
+other useful LoRA training details. A common workflow is to generate person text
+captions first, quickly review them, then run `JSON from Text` if you also want
+Ideogram JSON sidecars.
 
 Multiple images can be selected with Shift, Ctrl, or `Ctrl+A`. The app asks for
 confirmation before running an auto-captioning job on more than one image.
@@ -194,6 +213,7 @@ to the built-in defaults.
 
 Keep these placeholders if you edit the matching prompt:
 
+- `person_caption_user.txt`: `{person_name}`
 - `text_to_json_user.txt`: `{caption}`
 - `json_refine_user.txt`: `{instructions}`, `{source_caption}`, `{caption_json}`
 - `bbox_user.txt`: `{context_json}`, `{targets_json}`

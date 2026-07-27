@@ -39,6 +39,8 @@ from .llm_captioning import (
     DEFAULT_YOLO_BBOX_IMGSZ,
     DEFAULT_YOLOE26_BBOX_MODEL,
     ModelJsonError,
+    PLAIN_CAPTION_MODE_PERSON,
+    PLAIN_CAPTION_MODE_STANDARD,
     add_bboxes_to_caption,
     bbox_backend_uses_server,
     build_llama_server_command,
@@ -59,6 +61,7 @@ from .llm_captioning import (
     profile_label_from_id,
     profile_labels,
     profiles_for_task,
+    resolve_server_model_id,
     runtime_config_for_task,
     save_settings,
     server_model_ids,
@@ -153,6 +156,10 @@ CAPTION_FILTER_ANY_MEDIUM = "Any medium"
 CAPTION_FILTER_MODE_OPTIONS = (CAPTION_FILTER_ANY_MODE, *STYLE_MODES)
 CAPTION_FILTER_MEDIUM_OPTIONS = (CAPTION_FILTER_ANY_MEDIUM, *COMMON_MEDIA)
 ASYNC_IMAGE_FILTER_SORTS = {IMAGE_SORT_JSON_MISSING, IMAGE_SORT_TEXT_MISSING}
+COPY_MODE_BOTH = "Both for Excel"
+COPY_MODE_JSON = "JSON caption"
+COPY_MODE_TEXT = "Text caption"
+COPY_MODE_OPTIONS = (COPY_MODE_BOTH, COPY_MODE_JSON, COPY_MODE_TEXT)
 RUNTIME_LOCAL_LABEL = "Local llama.cpp (recommended)"
 RUNTIME_EXISTING_LABEL = "Connect to existing server"
 RUNTIME_CUSTOM_LABEL = "Custom start commands"
@@ -170,6 +177,12 @@ BBOX_BACKEND_TO_LABEL = {
 BBOX_BACKEND_LABEL_TO_MODE = {label: mode for mode, label in BBOX_BACKEND_TO_LABEL.items()}
 BBOX_BACKEND_LABELS = tuple(BBOX_BACKEND_TO_LABEL.values())
 ULTRALYTICS_BBOX_DEFAULT_MODELS = {DEFAULT_YOLOE26_BBOX_MODEL}
+TEXT_CAPTION_MODE_TO_LABEL = {
+    PLAIN_CAPTION_MODE_STANDARD: "General image captions",
+    PLAIN_CAPTION_MODE_PERSON: "Person dataset captions",
+}
+TEXT_CAPTION_LABEL_TO_MODE = {label: mode for mode, label in TEXT_CAPTION_MODE_TO_LABEL.items()}
+TEXT_CAPTION_MODE_LABELS = tuple(TEXT_CAPTION_MODE_TO_LABEL.values())
 
 
 def mix_hex_color(color: str, base: str, amount: float) -> str:
@@ -271,6 +284,13 @@ class CaptioningPreferencesDialog(tk.Toplevel):
         self.disable_thinking_var = tk.BooleanVar(value=settings.disable_thinking)
         self.debug_llm_var = tk.BooleanVar(value=settings.debug_llm_output)
         self.vision_format_var = tk.StringVar(value=settings.vision_image_format)
+        self.plain_caption_mode_var = tk.StringVar(
+            value=TEXT_CAPTION_MODE_TO_LABEL.get(
+                settings.plain_caption_mode,
+                TEXT_CAPTION_MODE_TO_LABEL[PLAIN_CAPTION_MODE_STANDARD],
+            )
+        )
+        self.person_caption_name_var = tk.StringVar(value=settings.person_caption_name)
         self.max_caption_tokens_var = tk.StringVar(value=str(settings.max_tokens_caption))
         self.max_json_tokens_var = tk.StringVar(value=str(settings.max_tokens_json))
         self.max_bbox_tokens_var = tk.StringVar(value=str(settings.max_tokens_bboxes))
@@ -294,6 +314,7 @@ class CaptioningPreferencesDialog(tk.Toplevel):
         self.server_timeout_var = tk.StringVar(value=str(settings.server_startup_timeout))
         self.stop_server_var = tk.BooleanVar(value=settings.stop_server_after_job)
         self.custom_profile_frames: dict[str, dict[str, ttk.Frame]] = {}
+        self.model_id_combos: dict[str, ttk.Combobox] = {}
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -405,7 +426,17 @@ class CaptioningPreferencesDialog(tk.Toplevel):
         )
         ttk.Label(parent, text=hint, wraplength=680).grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 0))
         row += 1
-        ttk.Button(parent, text="Test Server", command=self._test_server).grid(row=row, column=0, sticky="w", pady=(12, 0))
+        ttk.Button(parent, text="Test / Discover Models", command=self._test_server).grid(
+            row=row,
+            column=0,
+            sticky="w",
+            pady=(12, 0),
+        )
+        ttk.Label(
+            parent,
+            text="Discovered model IDs become choices in the Models tab.",
+            wraplength=500,
+        ).grid(row=row, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(12, 0))
         self._on_runtime_mode_changed()
 
     def _build_models_tab(self, parent: ttk.Frame) -> None:
@@ -476,7 +507,11 @@ class CaptioningPreferencesDialog(tk.Toplevel):
         combo.grid(row=row, column=1, sticky="ew", pady=4)
         combo.bind("<<ComboboxSelected>>", lambda _event, t=task: self._on_profile_changed(t))
         row += 1
-        row = self._add_entry(parent, row, "API model name", model_var)
+        ttk.Label(parent, text="API model ID").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        model_combo = ttk.Combobox(parent, textvariable=model_var)
+        model_combo.grid(row=row, column=1, sticky="ew", pady=4)
+        self.model_id_combos[task] = model_combo
+        row += 1
 
         hf_frame = ttk.Frame(parent)
         hf_frame.grid(row=row, column=0, columnspan=2, sticky="ew")
@@ -584,6 +619,15 @@ class CaptioningPreferencesDialog(tk.Toplevel):
             state="readonly",
         ).grid(row=row, column=1, sticky="ew", pady=4)
         row += 1
+        ttk.Label(parent, text="Text caption mode").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(
+            parent,
+            textvariable=self.plain_caption_mode_var,
+            values=TEXT_CAPTION_MODE_LABELS,
+            state="readonly",
+        ).grid(row=row, column=1, sticky="ew", pady=4)
+        row += 1
+        row = self._add_entry(parent, row, "Person caption name", self.person_caption_name_var)
 
         for label, variable in (
             ("Plain caption max tokens", self.max_caption_tokens_var),
@@ -623,6 +667,9 @@ class CaptioningPreferencesDialog(tk.Toplevel):
 
     def _bbox_backend(self) -> str:
         return BBOX_BACKEND_LABEL_TO_MODE.get(self.bbox_backend_var.get(), BBOX_BACKEND_VLM)
+
+    def _plain_caption_mode(self) -> str:
+        return TEXT_CAPTION_LABEL_TO_MODE.get(self.plain_caption_mode_var.get(), PLAIN_CAPTION_MODE_STANDARD)
 
     def _on_bbox_backend_changed(self) -> None:
         current_model = self.yolo_bbox_model_var.get().strip()
@@ -671,10 +718,47 @@ class CaptioningPreferencesDialog(tk.Toplevel):
         self._update_custom_profile_visibility("caption")
 
     def _test_server(self) -> None:
-        if is_server_ready(self.base_url_var.get().strip(), self.api_key_var.get().strip(), timeout=5.0):
-            messagebox.showinfo("Server ready", "The OpenAI-compatible endpoint responded to /models.")
-        else:
-            messagebox.showwarning("Server unavailable", "The endpoint did not respond to /models.")
+        base_url = self.base_url_var.get().strip()
+        try:
+            model_ids = sorted(server_model_ids(base_url, self.api_key_var.get().strip(), timeout=5.0))
+        except Exception as exc:
+            messagebox.showwarning(
+                "Server unavailable",
+                f"The OpenAI-compatible /models endpoint at {base_url} did not respond.\n\n{exc}",
+            )
+            return
+
+        for combo in self.model_id_combos.values():
+            combo.configure(values=model_ids)
+
+        if not model_ids:
+            messagebox.showwarning(
+                "Server responded without models",
+                "The /models endpoint responded, but it did not report any model IDs. "
+                "You can still type a model ID manually in the Models tab.",
+            )
+            return
+
+        available = "\n".join(f"• {model_id}" for model_id in model_ids)
+        if len(model_ids) == 1:
+            selected = model_ids[0]
+            if self._runtime_mode() == "existing":
+                self.caption_model_var.set(selected)
+                self.bbox_model_var.set(selected)
+                detail = "It has been selected for captioning and bbox VLM tasks."
+            else:
+                detail = "Switch to Connect to existing server to use it."
+            messagebox.showinfo(
+                "Server model discovered",
+                f"The server exposes one model:\n\n{selected}\n\n{detail}",
+            )
+            return
+
+        messagebox.showinfo(
+            "Server models discovered",
+            f"The server exposes {len(model_ids)} models:\n\n{available}\n\n"
+            "Choose the exact API model ID for each task in the Models tab.",
+        )
 
     def _parse_int(self, variable: tk.StringVar, label: str, minimum: int = 0) -> int:
         try:
@@ -733,6 +817,8 @@ class CaptioningPreferencesDialog(tk.Toplevel):
                 disable_thinking=self.disable_thinking_var.get(),
                 debug_llm_output=self.debug_llm_var.get(),
                 vision_image_format=self.vision_format_var.get(),
+                plain_caption_mode=self._plain_caption_mode(),
+                person_caption_name=self.person_caption_name_var.get().strip(),
                 max_tokens_caption=self._parse_int(self.max_caption_tokens_var, "Plain caption max tokens", 1),
                 max_tokens_json=self._parse_int(self.max_json_tokens_var, "JSON max tokens", 1),
                 max_tokens_bboxes=self._parse_int(self.max_bbox_tokens_var, "BBox max tokens", 1),
@@ -884,6 +970,7 @@ class CaptionEditorApp(tk.Tk):
         self.image_filter_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self.image_filter_generation = 0
         self.image_filter_completion: Callable[[], None] | None = None
+        self.copy_feedback_job: str | None = None
 
         self.caption_extension_var = tk.StringVar(value=".json")
         self.original_extension_var = tk.StringVar(value=".txt")
@@ -892,10 +979,18 @@ class CaptionEditorApp(tk.Tk):
         self.caption_filter_scope_var = tk.StringVar(value=CAPTION_FILTER_BOTH)
         self.caption_filter_mode_var = tk.StringVar(value=CAPTION_FILTER_ANY_MODE)
         self.caption_filter_medium_var = tk.StringVar(value=CAPTION_FILTER_ANY_MEDIUM)
+        self.copy_mode_var = tk.StringVar(value=COPY_MODE_BOTH)
         self.status_var = tk.StringVar(value="Open a folder to begin.")
         self.ai_progress_var = tk.DoubleVar(value=0.0)
         self.ai_progress_text_var = tk.StringVar(value="")
         self.original_status_var = tk.StringVar(value="Text caption: .txt")
+        self.plain_caption_mode_var = tk.StringVar(
+            value=TEXT_CAPTION_MODE_TO_LABEL.get(
+                self.captioning_settings.plain_caption_mode,
+                TEXT_CAPTION_MODE_TO_LABEL[PLAIN_CAPTION_MODE_STANDARD],
+            )
+        )
+        self.person_caption_name_var = tk.StringVar(value=self.captioning_settings.person_caption_name)
         self.image_title_var = tk.StringVar(value="No image loaded")
         self.style_mode_var = tk.StringVar(value="photo")
         self.medium_var = tk.StringVar(value="photograph")
@@ -993,14 +1088,16 @@ class CaptionEditorApp(tk.Tk):
         )
         self.original_extension_combo.grid(row=0, column=4, padx=(0, 8))
         ttk.Button(toolbar, text="Save", command=self.save_current, style="Accent.TButton").grid(row=0, column=5, padx=(0, 8))
-        ttk.Button(toolbar, text="Copy", command=self.copy_caption_pair_to_clipboard).grid(row=0, column=6, padx=(0, 2))
-        self.copy_menu_button = ttk.Menubutton(toolbar, text="v", width=2)
-        self.copy_menu = tk.Menu(self.copy_menu_button, tearoff=False)
-        self.copy_menu.add_command(label="Both for Excel", command=self.copy_caption_pair_to_clipboard)
-        self.copy_menu.add_command(label="JSON caption", command=self.copy_json_caption_to_clipboard)
-        self.copy_menu.add_command(label="Text caption", command=self.copy_text_caption_to_clipboard)
-        self.copy_menu_button["menu"] = self.copy_menu
-        self.copy_menu_button.grid(row=0, column=7, padx=(0, 8))
+        self.copy_button = ttk.Button(toolbar, text="Copy", command=self.copy_selected_caption_to_clipboard, width=7)
+        self.copy_button.grid(row=0, column=6, padx=(0, 2))
+        self.copy_mode_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.copy_mode_var,
+            values=COPY_MODE_OPTIONS,
+            state="readonly",
+            width=14,
+        )
+        self.copy_mode_combo.grid(row=0, column=7, padx=(0, 8))
         ttk.Button(toolbar, text="Copy to edit", command=self.copy_current_image_to_edit).grid(row=0, column=8, padx=(0, 8))
         ttk.Button(toolbar, text="Previous", command=self.previous_image).grid(row=0, column=9, padx=(0, 4))
         ttk.Button(toolbar, text="Next", command=self.next_image).grid(row=0, column=10, padx=(0, 8))
@@ -1304,6 +1401,21 @@ class CaptionEditorApp(tk.Tk):
         for column in range(2):
             ai_frame.columnconfigure(column, weight=1)
 
+        ttk.Combobox(
+            ai_frame,
+            textvariable=self.plain_caption_mode_var,
+            values=TEXT_CAPTION_MODE_LABELS,
+            state="readonly",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        ttk.Label(ai_frame, text="Person name").grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        ttk.Entry(ai_frame, textvariable=self.person_caption_name_var).grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(0, 8),
+        )
+
         buttons = (
             ("Text Caption", self.auto_generate_text_caption),
             ("JSON from Text", self.auto_generate_json_from_text),
@@ -1317,9 +1429,15 @@ class CaptionEditorApp(tk.Tk):
         self.ai_buttons = []
         for index, (label, command) in enumerate(buttons):
             button = ttk.Button(ai_frame, text=label, command=command)
-            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0 if index % 2 == 0 else 4, 0), pady=(0, 4))
+            button.grid(
+                row=3 + index // 2,
+                column=index % 2,
+                sticky="ew",
+                padx=(0 if index % 2 == 0 else 4, 0),
+                pady=(0, 4),
+            )
             self.ai_buttons.append(button)
-        cancel_row = (len(buttons) + 1) // 2
+        cancel_row = 3 + (len(buttons) + 1) // 2
         self.ai_cancel_button = ttk.Button(ai_frame, text="Cancel Run", command=self.cancel_ai_job, state="disabled")
         self.ai_cancel_button.grid(row=cancel_row, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         row += 1
@@ -3049,11 +3167,19 @@ class CaptionEditorApp(tk.Tk):
         self.set_selected_bbox([0, 0, 1000, 1000], mark=True)
 
     def open_captioning_preferences(self) -> None:
+        self.sync_plain_caption_settings()
         dialog = CaptioningPreferencesDialog(self, self.captioning_settings)
         self.wait_window(dialog)
         if dialog.result is None:
             return
         self.captioning_settings = dialog.result
+        self.plain_caption_mode_var.set(
+            TEXT_CAPTION_MODE_TO_LABEL.get(
+                self.captioning_settings.plain_caption_mode,
+                TEXT_CAPTION_MODE_TO_LABEL[PLAIN_CAPTION_MODE_STANDARD],
+            )
+        )
+        self.person_caption_name_var.set(self.captioning_settings.person_caption_name)
         try:
             path = save_settings(self.captioning_settings)
         except OSError as exc:
@@ -3061,13 +3187,37 @@ class CaptionEditorApp(tk.Tk):
             return
         self.status_var.set(f"Saved auto-captioning preferences to {path.name}.")
 
+    def sync_plain_caption_settings(self, require_person_name: bool = False) -> bool:
+        mode = TEXT_CAPTION_LABEL_TO_MODE.get(self.plain_caption_mode_var.get(), PLAIN_CAPTION_MODE_STANDARD)
+        person_name = self.person_caption_name_var.get().strip()
+        if require_person_name and mode == PLAIN_CAPTION_MODE_PERSON and not person_name:
+            self.status_var.set("Enter a person name before running person text captions.")
+            return False
+        changed = (
+            self.captioning_settings.plain_caption_mode != mode
+            or self.captioning_settings.person_caption_name != person_name
+        )
+        self.captioning_settings.plain_caption_mode = mode
+        self.captioning_settings.person_caption_name = person_name
+        if changed:
+            try:
+                save_settings(self.captioning_settings)
+            except OSError as exc:
+                messagebox.showerror("Preferences not saved", str(exc))
+                return False
+        return True
+
     def auto_generate_text_caption(self) -> None:
         self.save_current()
+        if not self.sync_plain_caption_settings(require_person_name=True):
+            return
         self.ensure_original_extension_for_ai()
         self.start_ai_job("text", "text captions")
 
     def auto_generate_json_from_text(self) -> None:
         self.save_current()
+        if not self.sync_plain_caption_settings():
+            return
         self.ensure_original_extension_for_ai()
         self.start_ai_job("json_text", "JSON captions from text")
 
@@ -3286,6 +3436,8 @@ class CaptionEditorApp(tk.Tk):
                 return
 
         self.save_current()
+        if not self.sync_plain_caption_settings(require_person_name=operation == "text"):
+            return
         caption_extension = self.caption_extension_var.get()
         targets = [
             {
@@ -3378,19 +3530,25 @@ class CaptionEditorApp(tk.Tk):
                 event["state"] = state
             self.ai_queue.put(event)
 
-        def ensure_endpoint_exposes_model(config_label: str, api_model: str) -> None:
+        def ensure_endpoint_exposes_model(task: str, config_label: str, api_model: str) -> None:
             try:
                 model_ids = server_model_ids(settings.base_url, settings.api_key, timeout=5.0)
             except Exception as exc:
                 raise AutoCaptionError(f"Captioning server is not reachable at {settings.base_url}: {exc}") from exc
-            if api_model and model_ids and api_model not in model_ids:
-                available = ", ".join(sorted(model_ids)) or "(none)"
-                raise AutoCaptionError(
-                    f"Server at {settings.base_url} is running, but it does not expose the selected model alias "
-                    f"'{api_model}' for {config_label}. Available aliases: {available}. "
-                    "Stop the existing server, change the API model name/profile, or switch Preferences to "
-                    "'Connect to existing server' with the matching alias."
-                )
+            resolved_model = resolve_server_model_id(
+                api_model,
+                model_ids,
+                auto_select_single=settings.server_start_mode == "existing",
+            )
+            if resolved_model == api_model:
+                return
+            if task == "bbox":
+                settings.bbox_model = resolved_model
+            else:
+                settings.caption_model = resolved_model
+            progress(
+                f"Using the only model exposed by the existing server for {config_label}: {resolved_model}"
+            )
 
         def format_bbox_reasons(reason_counts: dict[str, int]) -> str:
             if not reason_counts:
@@ -3419,7 +3577,7 @@ class CaptionEditorApp(tk.Tk):
                 return
             config = runtime_config_for_task(settings, task)
             if settings.server_start_mode == "existing" or not settings.auto_start_server:
-                ensure_endpoint_exposes_model(config.label, config.api_model)
+                ensure_endpoint_exposes_model(task, config.label, config.api_model)
                 return
 
             command_task = task
@@ -3428,7 +3586,7 @@ class CaptionEditorApp(tk.Tk):
                 managed_command = None
                 managed_phase = None
             if managed_process is None and is_server_ready(settings.base_url, settings.api_key, timeout=3.0):
-                ensure_endpoint_exposes_model(config.label, config.api_model)
+                ensure_endpoint_exposes_model(task, config.label, config.api_model)
                 progress(f"Endpoint is already running with {config.api_model}.")
                 return
             if settings.server_start_mode == "local":
@@ -3913,6 +4071,34 @@ class CaptionEditorApp(tk.Tk):
             messagebox.showerror("Copy failed", str(exc))
             return
         self.status_var.set(status)
+        self.show_copy_feedback()
+
+    def show_copy_feedback(self) -> None:
+        copy_button = self.__dict__.get("copy_button")
+        if copy_button is None:
+            return
+        copy_feedback_job = self.__dict__.get("copy_feedback_job")
+        if copy_feedback_job is not None:
+            try:
+                self.after_cancel(copy_feedback_job)
+            except tk.TclError:
+                pass
+            self.copy_feedback_job = None
+        try:
+            copy_button.configure(text="Copied", style="Accent.TButton")
+        except tk.TclError:
+            return
+        self.copy_feedback_job = self.after(900, self.reset_copy_feedback)
+
+    def reset_copy_feedback(self) -> None:
+        self.copy_feedback_job = None
+        copy_button = self.__dict__.get("copy_button")
+        if copy_button is None:
+            return
+        try:
+            copy_button.configure(text="Copy", style="TButton")
+        except tk.TclError:
+            return
 
     def copy_json_caption_to_clipboard(self) -> None:
         captions = self.current_clipboard_captions()
@@ -3927,6 +4113,15 @@ class CaptionEditorApp(tk.Tk):
             return
         _json_caption, text_caption = captions
         self.copy_text_to_clipboard(text_caption, "Copied text caption to clipboard.")
+
+    def copy_selected_caption_to_clipboard(self) -> None:
+        mode = self.copy_mode_var.get()
+        if mode == COPY_MODE_JSON:
+            self.copy_json_caption_to_clipboard()
+        elif mode == COPY_MODE_TEXT:
+            self.copy_text_caption_to_clipboard()
+        else:
+            self.copy_caption_pair_to_clipboard()
 
     def copy_caption_pair_to_clipboard(self) -> None:
         captions = self.current_clipboard_captions()

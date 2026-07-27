@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ideogram_captioner.gui import (
     AI_IMAGE_STATE_ACTIVE,
@@ -8,12 +9,16 @@ from ideogram_captioner.gui import (
     CAPTION_FILTER_BOTH,
     CAPTION_FILTER_JSON,
     CAPTION_FILTER_ORIGINAL,
+    COPY_MODE_BOTH,
+    COPY_MODE_JSON,
+    COPY_MODE_TEXT,
     IMAGE_LIST_AI_ACTIVE_BG,
     IMAGE_LIST_AI_DONE_BG,
     IMAGE_LIST_AI_QUEUED_BG,
     IMAGE_LIST_BG,
     IMAGE_SORT_JSON_MISSING,
     IMAGE_SORT_TEXT_MISSING,
+    CaptioningPreferencesDialog,
     CaptionEditorApp,
 )
 from ideogram_captioner.schema import default_caption
@@ -29,6 +34,22 @@ class FakeVar:
 
     def set(self, value: str) -> None:
         self.value = value
+
+
+class FakeButton:
+    def __init__(self) -> None:
+        self.config: dict[str, str] = {}
+
+    def configure(self, **kwargs: str) -> None:
+        self.config.update(kwargs)
+
+
+class FakeCombo:
+    def __init__(self) -> None:
+        self.config: dict[str, object] = {}
+
+    def configure(self, **kwargs: object) -> None:
+        self.config.update(kwargs)
 
 
 class FakeListbox:
@@ -368,6 +389,7 @@ class GuiSelectionTests(unittest.TestCase):
         app.current_caption = {"high_level_description": "json caption"}
         app.original_text = FakeText('text caption with "quotes"')
         app.status_var = FakeVar("")
+        app.copy_mode_var = FakeVar(COPY_MODE_BOTH)
         app.sync_caption_from_form = lambda: None
         app.clipboard_value = ""
         app.clipboard_clear = lambda: setattr(app, "clipboard_value", "")
@@ -398,6 +420,70 @@ class GuiSelectionTests(unittest.TestCase):
         self.assertIn("\t", app.clipboard_value)
         self.assertTrue(app.clipboard_value.startswith('"text caption with ""quotes"""\t'))
         self.assertEqual(app.status_var.get(), "Copied text and JSON captions for Excel.")
+
+    def test_copy_selected_caption_to_clipboard_uses_json_mode(self) -> None:
+        app = self.make_clipboard_app()
+        app.copy_mode_var.set(COPY_MODE_JSON)
+
+        app.copy_selected_caption_to_clipboard()
+
+        self.assertIn('"high_level_description":"json caption"', app.clipboard_value)
+        self.assertNotIn("\t", app.clipboard_value)
+        self.assertEqual(app.status_var.get(), "Copied JSON caption to clipboard.")
+
+    def test_copy_selected_caption_to_clipboard_uses_text_mode(self) -> None:
+        app = self.make_clipboard_app()
+        app.copy_mode_var.set(COPY_MODE_TEXT)
+
+        app.copy_selected_caption_to_clipboard()
+
+        self.assertEqual(app.clipboard_value, 'text caption with "quotes"')
+        self.assertEqual(app.status_var.get(), "Copied text caption to clipboard.")
+
+    def test_successful_copy_flashes_copy_button_feedback(self) -> None:
+        app = self.make_clipboard_app()
+        app.copy_button = FakeButton()
+        app.copy_feedback_job = None
+        scheduled: list[tuple[int, object]] = []
+        app.after = lambda delay, callback: scheduled.append((delay, callback)) or "copy-feedback"
+        app.after_cancel = lambda _job: None
+
+        app.copy_text_to_clipboard("copied value", "Copied value.")
+
+        self.assertEqual(app.copy_button.config["text"], "Copied")
+        self.assertEqual(app.copy_button.config["style"], "Accent.TButton")
+        self.assertEqual(app.copy_feedback_job, "copy-feedback")
+        self.assertEqual(scheduled[0][0], 900)
+
+        scheduled[0][1]()
+
+        self.assertEqual(app.copy_button.config["text"], "Copy")
+        self.assertEqual(app.copy_button.config["style"], "TButton")
+        self.assertIsNone(app.copy_feedback_job)
+
+    def test_server_discovery_populates_choices_and_selects_only_model(self) -> None:
+        dialog = object.__new__(CaptioningPreferencesDialog)
+        dialog.base_url_var = FakeVar("http://127.0.0.1:1234/v1")
+        dialog.api_key_var = FakeVar("key")
+        dialog.runtime_mode_var = FakeVar("Connect to existing server")
+        dialog.caption_model_var = FakeVar("local-model")
+        dialog.bbox_model_var = FakeVar("local-model")
+        caption_combo = FakeCombo()
+        bbox_combo = FakeCombo()
+        dialog.model_id_combos = {"caption": caption_combo, "bbox": bbox_combo}
+
+        with (
+            patch("ideogram_captioner.gui.server_model_ids", return_value={"lm-studio/qwen-vision"}) as discover,
+            patch("ideogram_captioner.gui.messagebox.showinfo") as showinfo,
+        ):
+            dialog._test_server()
+
+        discover.assert_called_once_with("http://127.0.0.1:1234/v1", "key", timeout=5.0)
+        self.assertEqual(caption_combo.config["values"], ["lm-studio/qwen-vision"])
+        self.assertEqual(bbox_combo.config["values"], ["lm-studio/qwen-vision"])
+        self.assertEqual(dialog.caption_model_var.get(), "lm-studio/qwen-vision")
+        self.assertEqual(dialog.bbox_model_var.get(), "lm-studio/qwen-vision")
+        showinfo.assert_called_once()
 
 
 if __name__ == "__main__":

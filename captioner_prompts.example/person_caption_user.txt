@@ -1,0 +1,5 @@
+Caption this image for a text-to-image LoRA dataset.
+Provided person name: {person_name}
+
+Describe the image naturally and descriptively while following the system rules.
+For images with two or more featured people, explicitly describe each featured person by position and use the provided name for the named person.
